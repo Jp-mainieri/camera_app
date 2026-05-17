@@ -1,121 +1,252 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
+  try {
+    await _loginAsAdmin();
+  } on FirebaseAuthException catch (e) {
+    debugPrint('Erro ao autenticar: ${e.code} - ${e.message}');
+  }
   runApp(const MyApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+Future<UserCredential> _loginAsAdmin() {
+  return FirebaseAuth.instance.signInWithEmailAndPassword(
+    email: 'admin@teste.com.br',
+    password: '123456',
+  );
+}
 
-  // This widget is the root of your application.
+class MyApp extends StatelessWidget {
+  const MyApp({super.key, this.home});
+
+  final Widget? home;
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      title: 'Camera App',
+      theme: ThemeData(primarySwatch: Colors.blue),
+      home: home ?? const CameraScreen(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class CameraScreen extends StatefulWidget {
+  const CameraScreen({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<CameraScreen> createState() => _CameraScreenState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _CameraScreenState extends State<CameraScreen> {
+  CameraController? _controller;
+  XFile? imageFile;
+  String? uploadedImageUrl;
+  String? _cameraError;
+  bool _isUploading = false;
+  bool _isTakingPicture = false;
 
-  void _incrementCounter() {
+  @override
+  void initState() {
+    super.initState();
+    _initializeCamera();
+  }
+
+  Future<void> _initializeCamera() async {
+    try {
+      final cameras = await availableCameras();
+      if (cameras.isEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _cameraError = 'Nenhuma camera encontrada neste dispositivo.';
+        });
+        return;
+      }
+
+      _controller = CameraController(cameras.first, ResolutionPreset.high);
+      await _controller!.initialize();
+
+      if (!mounted) return;
+      setState(() {});
+    } on CameraException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _cameraError = 'Erro ao iniciar a camera: ${e.description ?? e.code}';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _cameraError = 'Erro ao iniciar a camera: $e';
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  Future<void> _takePicture() async {
+    final controller = _controller;
+    if (controller == null ||
+        !controller.value.isInitialized ||
+        controller.value.isTakingPicture) {
+      return;
+    }
+
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _isTakingPicture = true;
     });
+
+    try {
+      final file = await controller.takePicture();
+      if (!mounted) return;
+      setState(() {
+        imageFile = file;
+        uploadedImageUrl = null;
+      });
+    } on CameraException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Falha ao tirar foto: ${e.description ?? e.code}'),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isTakingPicture = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _uploadToFirebase() async {
+    if (imageFile == null) return;
+
+    setState(() {
+      _isUploading = true;
+    });
+
+    try {
+      final fileName = '${DateTime.now().millisecondsSinceEpoch}.jpg';
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Usuário não encontrado')));
+        return;
+      }
+      final uid = user.uid;
+      final storageRef = FirebaseStorage.instance.ref('$uid/$fileName');
+      await storageRef.putFile(
+        File(imageFile!.path),
+        SettableMetadata(contentType: 'image/jpeg'),
+      );
+      final downloadUrl = await storageRef.getDownloadURL();
+
+      if (!mounted) return;
+      setState(() {
+        uploadedImageUrl = downloadUrl;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Upload concluido com sucesso!')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Falha no upload: $e')));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUploading = false;
+        });
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
-    return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
-          children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
+    if (_cameraError != null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Camera App')),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text(_cameraError!, textAlign: TextAlign.center),
+          ),
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
+      );
+    }
+
+    if (_controller == null || !_controller!.value.isInitialized) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Camera App')),
+      body: Column(
+        children: [
+          Expanded(
+            child: imageFile == null
+                ? CameraPreview(_controller!)
+                : Image.file(File(imageFile!.path)),
+          ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              if (imageFile == null)
+                ElevatedButton(
+                  onPressed: _isTakingPicture ? null : _takePicture,
+                  child: _isTakingPicture
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Tirar Foto'),
+                )
+              else ...[
+                ElevatedButton(
+                  onPressed: _isUploading
+                      ? null
+                      : () => setState(() {
+                          imageFile = null;
+                          uploadedImageUrl = null;
+                        }),
+                  child: const Text('Tirar Outra'),
+                ),
+                ElevatedButton(
+                  onPressed: _isUploading ? null : _uploadToFirebase,
+                  child: _isUploading
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Upload'),
+                ),
+              ],
+            ],
+          ),
+          if (uploadedImageUrl != null)
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: SelectableText(
+                uploadedImageUrl!,
+                textAlign: TextAlign.center,
+              ),
+            ),
+        ],
       ),
     );
   }
