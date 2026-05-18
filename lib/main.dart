@@ -8,32 +8,20 @@ import 'package:firebase_auth/firebase_auth.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
-  try {
-    await _loginAsAdmin();
-  } on FirebaseAuthException catch (e) {
-    debugPrint('Erro ao autenticar: ${e.code} - ${e.message}');
-  }
-  runApp(const MyApp());
-}
-
-Future<UserCredential> _loginAsAdmin() {
-  return FirebaseAuth.instance.signInWithEmailAndPassword(
-    email: 'admin@teste.com.br',
-    password: '123456',
-  );
+  final initialUser = FirebaseAuth.instance.currentUser;
+  runApp(MyApp(initialUser: initialUser));
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key, this.home});
-
-  final Widget? home;
+  final User? initialUser;
+  const MyApp({super.key, required this.initialUser});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Camera App',
       theme: ThemeData(primarySwatch: Colors.blue),
-      home: home ?? const CameraScreen(),
+      home: initialUser != null ? const CameraScreen() : const LoginScreen(),
     );
   }
 }
@@ -52,6 +40,7 @@ class _CameraScreenState extends State<CameraScreen> {
   String? _cameraError;
   bool _isUploading = false;
   bool _isTakingPicture = false;
+  bool _isSigninOut = false;
 
   @override
   void initState() {
@@ -174,6 +163,15 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  Future<void> _signOut() async {
+    await FirebaseAuth.instance.signOut();
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (context) => const LoginScreen()),
+      (route) => false,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_cameraError != null) {
@@ -193,7 +191,12 @@ class _CameraScreenState extends State<CameraScreen> {
     }
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Camera App')),
+      appBar: AppBar(
+        title: const Text('Camera App'),
+        actions: [
+          IconButton(onPressed: _signOut, icon: const Icon(Icons.logout)),
+        ],
+      ),
       body: Column(
         children: [
           Expanded(
@@ -247,6 +250,137 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final user = FirebaseAuth.instance.currentUser;
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  String? _loginError;
+  bool _isLoading = false;
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _handleLogin() async {
+    if (_emailController.text.trim().isEmpty ||
+        _passwordController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: const Text('Por favor, preencha todos os campos.')),
+      );
+    }
+    setState(() {
+      _isLoading = true;
+    });
+    try {
+      final userCrendential = await FirebaseAuth.instance
+          .signInWithEmailAndPassword(
+            email: _emailController.text.trim(),
+            password: _passwordController.text.trim(),
+          );
+      if (!mounted) return;
+      _showUserInfo(userCrendential.user);
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (context) => const CameraScreen()),
+      );
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      if (e.code == 'user-not-found') _loginError = 'Usuário não encontrado.';
+      if (e.code == 'wrong-password') _loginError = 'Senha incorreta.';
+      if (e.code == 'invalid-email') _loginError = 'Email inválido.';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_loginError ?? 'Ocorreu um erro ao fazer login.'),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Erro: $e')));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _showUserInfo(User? user) async {
+    try {
+      if (user == null) {
+        if (!mounted) return;
+        throw Error();
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Usuário autenticado:\nuid: ${user.uid} \nemail: ${user.email}',
+          ),
+        ),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Erro ao encontrar usuário')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Login')),
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextFormField(
+                controller: _emailController,
+                decoration: const InputDecoration(
+                  labelText: 'EMAIL',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _passwordController,
+                decoration: const InputDecoration(
+                  labelText: 'Senha',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: _isLoading ? null : _handleLogin,
+                child: _isLoading
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(),
+                      )
+                    : const Text('Entrar', style: TextStyle(fontSize: 16)),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
